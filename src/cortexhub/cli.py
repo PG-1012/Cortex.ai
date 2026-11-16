@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -216,7 +217,9 @@ def commit(
 @app.command("claude-config")
 def claude_config(
     install_desktop: bool = typer.Option(False, "--install-desktop",
-                                         help="Add CortexHub to Claude Desktop's config (a backup is kept)."),
+                                         help="Add CortexHub to Claude Desktop's config (a backup is kept). "
+                                              "Quit Claude Desktop first."),
+    force: bool = typer.Option(False, "--force", help="Install even if Claude Desktop seems to be running."),
 ) -> None:
     """Print, or install, the config that connects Claude Desktop and Claude Code to CortexHub."""
     uv = shutil.which("uv") or "uv"
@@ -230,6 +233,14 @@ def claude_config(
                 f"{uv} --directory {PROJECT_DIR} run cortex serve")
 
     if install_desktop:
+        # Claude Desktop keeps its config in memory and rewrites the file on its own, dropping
+        # entries added while it was running. So this has to be done while the app is quit.
+        procs = subprocess.run(["ps", "-axo", "comm"], capture_output=True, text=True).stdout.splitlines()
+        running = any(p.endswith("Claude.app/Contents/MacOS/Claude") for p in procs)
+        if running and not force:
+            _fail("Claude Desktop is running and would overwrite this change. Quit it (Cmd+Q), then run "
+                  "this from Terminal.app:\n  cd ~/Desktop/Personal_Projects/AI_Collab_platform && "
+                  "uv run cortex claude-config --install-desktop && open -a Claude")
         cfg: dict = {}
         if CLAUDE_DESKTOP_CONFIG.exists():
             cfg = json.loads(CLAUDE_DESKTOP_CONFIG.read_text() or "{}")

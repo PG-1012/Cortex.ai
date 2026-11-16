@@ -22,10 +22,12 @@ cd ~/Desktop/Personal_Projects/AI_Collab_platform
 uv sync
 uv run cortex init         # creates ~/CortexVault (set CORTEX_VAULT_PATH to put it elsewhere, e.g. Google Drive)
 uv run cortex claude-config                    # prints the Claude Desktop + Claude Code config
-uv run cortex claude-config --install-desktop  # or write it into Claude Desktop's config (keeps a .bak)
+uv run cortex claude-config --install-desktop && open -a Claude  # write it into Claude Desktop's config (keeps a .bak)
 ```
 
-Then restart Claude Desktop. For Claude Code, run the `claude mcp add ...` line that `claude-config`
+Quit Claude Desktop (Cmd+Q) **before** running `--install-desktop`, and run it from Terminal.app.
+Claude Desktop rewrites its config file from memory, so an entry added while it's open gets
+dropped. The command refuses to run while the app is open. For Claude Code, run the `claude mcp add ...` line that `claude-config`
 prints. Optionally, open `~/CortexVault` in Obsidian as a vault; Obsidian doesn't need to be running.
 
 ## Using it
