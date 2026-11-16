@@ -23,7 +23,7 @@ from typing import Any, Iterator
 import yaml
 
 IGNORED_DIRS = {".obsidian", ".trash", ".git", ".cortex"}
-ROOT_FILES = {"INDEX.md", "SCHEDULE.md", "MUSE.md"}
+ROOT_FILES = {"INDEX.md", "SCHEDULE.md", "MUSE.md", "TASKS.md"}
 NON_NOTE_ROOT_DIRS = {"muse"}  # Muse's inbox/exports: not vault notes
 FOLDERS = {"project": "projects", "plan": "plans", "decision": "decisions", "note": "notes"}
 ARCHIVE_DIR = "archive"
@@ -625,6 +625,7 @@ class Vault:
     def rebuild_index(self) -> str:
         from .index import render_index  # local imports avoid a cycle
         from .muse import banner_lines, save_index_edit
+        from .tasks import Tasks
 
         with self.lock():
             path = self.root / "INDEX.md"
@@ -634,7 +635,9 @@ class Vault:
             if current is not None and last is not None and current != last:
                 save_index_edit(self, last, current)  # someone edited INDEX.md: keep it, don't lose it
             text = render_index(self.notes(), today(), schedule_exists=(self.root / "SCHEDULE.md").exists(),
-                                banner=banner_lines(self), muse_guide=(self.root / "MUSE.md").exists())
+                                banner=banner_lines(self), muse_guide=(self.root / "MUSE.md").exists(),
+                                tasks_line=Tasks(self).summary_line() if (self.root / "TASKS.md").exists() else None,
+                                tasks_exists=(self.root / "TASKS.md").exists())
             if current != text:
                 atomic_write(path, text)
             if last != text:

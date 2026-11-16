@@ -19,6 +19,7 @@ from rich.table import Table
 from . import config
 from .index import days_label
 from .schedule import Schedule, parse_dt
+from .tasks import Tasks, window_label
 from .vault import NODE_TYPES, STATUSES, Vault, VaultError, split_frontmatter, today
 
 app = typer.Typer(help="CortexHub: shared memory for Claude and Muse, stored in an Obsidian vault.",
@@ -44,9 +45,11 @@ def _fail(msg: str) -> None:
 
 @app.command()
 def init() -> None:
-    """Create the vault folders, INDEX.md, SCHEDULE.md and schedule.ics."""
+    """Create the vault folders, INDEX.md, TASKS.md, SCHEDULE.md and schedule.ics."""
     v = _vault()
     Schedule(v).ensure()
+    Tasks(v).ensure()
+    v.rebuild_index()
     console.print(f"[green]Vault ready at[/green] {v.root}")
     console.print("Open that folder in Obsidian as a vault (optional), then run [bold]cortex claude-config[/bold].")
 
@@ -80,7 +83,7 @@ def index(quiet: bool = typer.Option(False, "--quiet", "-q", help="Rebuild witho
 
 @app.command()
 def status() -> None:
-    """Show active notes, deadlines, current focus and upcoming blocks."""
+    """Show active notes, deadlines, current focus, open tasks and fixed-time blocks."""
     v = _vault()
     processed, _ = v.sync()
     if processed:
@@ -94,7 +97,28 @@ def status() -> None:
         dl = f"{n.deadline} ({days_label(n.deadline, today())})" if n.deadline else "-"
         t.add_row(n.project or "-", n.link, n.node_type, n.status, dl, str(n.meta.get("in_progress") or "-"))
     console.print(t)
-    _print_blocks(Schedule(v).list(days_ahead=7), "Next 7 days")
+    _print_tasks(Tasks(v).list(), "Open tasks (Muse schedules these)")
+    blocks = Schedule(v).list(days_ahead=7)
+    if blocks:
+        _print_blocks(blocks, "Fixed-time blocks, next 7 days")
+
+
+def _print_tasks(tasks: list[dict], title: str) -> None:
+    t = Table(title=title)
+    for col in ("Task", "Min", "Window", "Project", "Status", "Id"):
+        t.add_column(col)
+    for x in tasks:
+        status = x["status"] + (f" · {x['note']}" if x.get("note") else "")
+        t.add_row(x["title"], str(x["duration_minutes"]), window_label(x), x.get("project") or "-", status, x["id"])
+    console.print(t if tasks else f"[dim]{title}: none.[/dim]")
+
+
+@app.command()
+def tasks(
+    all_: bool = typer.Option(False, "--all", help="Include tasks done or skipped in the last 14 days."),
+) -> None:
+    """Show the tasks Muse schedules (open ones by default)."""
+    _print_tasks(Tasks(_vault()).list(status="all" if all_ else "open"), "Tasks")
 
 
 def _print_blocks(blocks: list[dict], title: str) -> None:
@@ -109,7 +133,7 @@ def _print_blocks(blocks: list[dict], title: str) -> None:
 
 @app.command()
 def schedule(days: int = typer.Option(14, help="Days ahead to show.")) -> None:
-    """Show upcoming time blocks."""
+    """Show upcoming fixed-time blocks."""
     _print_blocks(Schedule(_vault()).list(days_ahead=days), f"Next {days} days")
 
 
@@ -135,13 +159,18 @@ def muse_prompt() -> None:
     root = config.vault_path()
     console.print(
         f"You share a folder with Claude at {root}. Before anything else, read {root}/MUSE.md and follow it "
-        f"exactly. Every time you plan my week, (1) read {root}/schedule.ics and put new or changed blocks on my "
-        f"calendar, and remove events that disappeared from it; (2) when I finish, skip or move a block, or make "
-        f"progress on a plan, write an update file to {root}/muse/inbox/ in the format MUSE.md describes; "
-        f"(3) keep {root}/muse/exports/calendar.md current with my events for the next 14 days; (4) when I ask "
-        f"you to save something to CortexHub (a plan, an insight, a summary), write it as a new_note file in "
-        f"{root}/muse/inbox/ as MUSE.md describes, following {root}/notes/vault-conventions.md. Never edit "
-        f"INDEX.md, SCHEDULE.md, schedule.ics or the notes directly.",
+        f"exactly. Claude decides what I should work on, how long it takes and by when; you decide when. "
+        f"(1) {root}/TASKS.md lists the open tasks: put each one on my Google Calendar inside its window "
+        f"(earliest to due), following its rules, keeping tasks from the same plan in order, and move them "
+        f"whenever I need. Re-read it whenever you plan my week: update events whose tasks changed, and delete "
+        f"events whose tasks disappeared. (2) {root}/schedule.ics holds the rare fixed-time blocks: copy those "
+        f"to my calendar as they are. (3) When I finish or skip a task, write an update file to "
+        f"{root}/muse/inbox/ as MUSE.md describes, with a short note if there's anything Claude should know "
+        f"(what was hard, what I'd change). (4) Keep {root}/muse/exports/calendar.md current with my events "
+        f"for the next 14 days. (5) When I ask you to save something to CortexHub (a plan, an insight, a "
+        f"summary), write it as a new_note file in {root}/muse/inbox/, following "
+        f"{root}/notes/vault-conventions.md. Never edit INDEX.md, TASKS.md, SCHEDULE.md, schedule.ics or the "
+        f"notes directly.",
         soft_wrap=True,
     )
 

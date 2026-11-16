@@ -93,7 +93,8 @@ def _questions_section(notes: list[Note]) -> list[str]:
     return lines or [NONE]
 
 
-def _directory_section(notes: list[Note], schedule_exists: bool, muse_guide: bool) -> list[str]:
+def _directory_section(notes: list[Note], schedule_exists: bool, muse_guide: bool,
+                       tasks_exists: bool = False, tasks_line: str | None = None) -> list[str]:
     labels = {v: k for k, v in FOLDERS.items()}
     order = [*FOLDERS.values(), ARCHIVE_DIR]
     buckets: dict[str, list[Note]] = defaultdict(list)
@@ -114,15 +115,18 @@ def _directory_section(notes: list[Note], schedule_exists: bool, muse_guide: boo
                 summary = summary[:87] + "..."
             status = f" · {n.status}" if n.meta else ""
             lines.append(f"  - [[{n.link}]]{status}" + (f" — {summary}" if summary else ""))
+    if tasks_exists:
+        lines.append("- **Tasks for Muse to schedule:** [[TASKS]]" + (f" ({tasks_line})" if tasks_line else " (none open)"))
     if schedule_exists:
-        lines.append("- **Schedule (Muse bridge):** [[SCHEDULE]]")
+        lines.append("- **Fixed-time blocks:** [[SCHEDULE]]")
     if muse_guide:
         lines.append("- **Muse protocol:** [[MUSE]]")
     return lines or [NONE]
 
 
 def render_index(notes: list[Note], today: date, schedule_exists: bool = False,
-                 banner: list[str] | None = None, muse_guide: bool = False) -> str:
+                 banner: list[str] | None = None, muse_guide: bool = False, tasks_exists: bool = False,
+                 tasks_line: str | None = None) -> str:
     out = [
         f"# CortexVault Master Index (Last Updated: {today.isoformat()})",
         "",
@@ -143,7 +147,7 @@ def render_index(notes: list[Note], today: date, schedule_exists: bool = False,
         *_questions_section(notes),
         "",
         "## 5. Vault Directory (Deep Notes)",
-        *_directory_section(notes, schedule_exists, muse_guide),
+        *_directory_section(notes, schedule_exists, muse_guide, tasks_exists, tasks_line),
         "",
     ]
     return "\n".join(out)

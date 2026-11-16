@@ -13,12 +13,14 @@ from starlette.responses import Response
 
 from . import config, muse
 from .schedule import Schedule, TimeBlockInput
+from .tasks import Tasks, TaskInput
 from .vault import Vault, VaultError
 
 INSTRUCTIONS = """\
 CortexHub is the user's shared long-term memory: a plain-Markdown Obsidian vault plus a file-based
-two-way bridge to Muse, their scheduling app. Muse reads schedule.ics from the vault and writes
-updates and new notes back into muse/inbox/ (applied automatically) and its calendar into muse/exports/.
+two-way bridge to Muse, their scheduling app. Muse reads TASKS.md (work to schedule) and schedule.ics
+(rare fixed-time blocks) from the vault, and writes updates and new notes back into muse/inbox/
+(applied automatically) and its calendar into muse/exports/.
 
 1. ALWAYS call `read_index` first, before searching, creating or updating notes. INDEX.md lists
    active projects and deadlines, current focus, settled decisions and open questions, with links.
@@ -29,11 +31,16 @@ updates and new notes back into muse/inbox/ (applied automatically) and its cale
 3. Before creating a note, look for an existing one (`search_notes`) and update it instead of
    duplicating it. Keep frontmatter accurate: `status`, `deadline`, `in_progress` (the current
    milestone, matching a heading in the body when possible), `decisions` and `open_questions`.
-4. When you produce or change an actionable plan, first call `read_muse_exports` to see the user's
-   existing calendar, then `schedule_time_blocks` so Muse puts the work on their calendar. Use
-   `replace_upcoming=true` when re-planning, so old blocks are replaced rather than duplicated.
+4. Scheduling: YOU decide what to do, how long it takes and by when; MUSE decides when. When you
+   produce or change an actionable plan, turn the next 1-2 weeks of it into tasks with `plan_tasks`:
+   a specific title, duration, an earliest -> due window, priority, what to do in the session, and
+   the user's scheduling rules from their decisions (e.g. "Fri/Sat/Sun only; never double up"). Don't
+   pick clock times. Check `list_tasks` first; for small changes edit tasks with `update_task`, and
+   use `replace_open=true` only to re-plan a whole plan. `read_muse_exports` shows how busy the user
+   is, so keep the load realistic. Use `schedule_time_blocks` ONLY when the user asks for a fixed time.
 5. If INDEX.md shows a "From Muse" banner, call `check_muse_inbox` and take Muse's messages into
-   account (e.g. skipped blocks mean the plan may need adjusting). Fix anything listed as an error.
+   account (e.g. skipped tasks mean the plan may need adjusting; done tasks with notes say what was
+   hard). Move the plan's `in_progress` on when a week's tasks are done. Fix anything listed as an error.
    Notes Muse created (source_agent: muse) are real notes: check they fit the vault's conventions
    (project names, titles) and tidy them with update_note if not.
 6. Note paths are vault-relative without ".md", e.g. "plans/robotics-kinematics-plan".
@@ -51,6 +58,7 @@ def vault() -> Vault:
     v = Vault(config.vault_path())
     v.init()
     Schedule(v).ensure()
+    Tasks(v).ensure()
     return v
 
 
@@ -212,7 +220,70 @@ def resolve_question(
     return {"resolved": removed, "logged_decision": resolution, "note": note.link}
 
 
-# --------------------------------------------------------------------------- scheduling (Muse bridge)
+# --------------------------------------------------------------------------- tasks (Muse schedules them)
+
+
+@mcp.tool
+@_guard
+def plan_tasks(
+    tasks: Annotated[list[TaskInput], Field(min_length=1, description="In the order they should be done.")],
+    replace_open: Annotated[bool, Field(description="First remove OPEN tasks from the same plan note (or the same "
+                                                    "project, for tasks without a plan). Done/skipped tasks are kept. "
+                                                    "Use this only when re-planning a whole plan.")] = False,
+    source_agent: Agent = "claude",
+) -> dict[str, Any]:
+    """The default way to schedule work. Add tasks to TASKS.md: what to do, how long, and by when
+    (earliest -> due window), with priority and scheduling rules, but NO clock times. Muse reads
+    TASKS.md, puts each task on the user's calendar inside its window and moves it as needed, then
+    reports it done or skipped. Usually plan the next 1-2 weeks, not a whole plan."""
+    added, removed = Tasks(vault()).add(tasks, replace_open=replace_open, source_agent=source_agent)
+    return {
+        "added": [{"id": t["id"], "title": t["title"], "minutes": t["duration_minutes"],
+                   "earliest": t["earliest"], "due": t["due"]} for t in added],
+        "removed_open": removed,
+        "summary": Tasks(vault()).summary_line(),
+    }
+
+
+@mcp.tool
+@_guard
+def update_task(
+    id: Annotated[str, Field(description="Task id from list_tasks or TASKS.md.")],
+    status: Literal["todo", "done", "skipped"] | None = None,
+    note: Annotated[str | None, Field(description="Outcome note, e.g. 'struggled with z-tables'.")] = None,
+    title: str | None = None,
+    duration_minutes: Annotated[int | None, Field(ge=5, le=480)] = None,
+    earliest: Annotated[str | None, Field(description="YYYY-MM-DD.")] = None,
+    due: Annotated[str | None, Field(description="YYYY-MM-DD.")] = None,
+    priority: Literal["high", "normal", "low"] | None = None,
+    details: str | None = None,
+    rules: str | None = None,
+) -> dict[str, Any]:
+    """Edit a task in place (window, duration, details...) or mark it done/skipped. Editing keeps its id,
+    so Muse updates the existing calendar event instead of making a new one."""
+    return Tasks(vault()).update(id, status=status, note=note, title=title, duration_minutes=duration_minutes,
+                                 earliest=earliest, due=due, priority=priority, details=details, rules=rules)
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+@_guard
+def list_tasks(
+    status: Literal["open", "done", "skipped", "all"] = "open",
+    project: str | None = None,
+    closed_days: Annotated[int, Field(ge=0, le=60, description="How far back to include done/skipped tasks.")] = 14,
+) -> list[dict[str, Any]]:
+    """List tasks (open by default), with ids, windows, and Muse's notes on finished ones."""
+    return Tasks(vault()).list(status=status, project=project, closed_days=closed_days)
+
+
+@mcp.tool
+@_guard
+def remove_tasks(ids: Annotated[list[str], Field(min_length=1)]) -> dict[str, Any]:
+    """Delete tasks by id (e.g. ones that no longer make sense). Muse removes their calendar events."""
+    return {"removed": Tasks(vault()).remove(ids)}
+
+
+# --------------------------------------------------------------------------- fixed-time blocks (rare)
 
 
 @mcp.tool
@@ -223,9 +294,9 @@ def schedule_time_blocks(
                                                         "project, for blocks without a source_note). Use this when re-planning.")] = False,
     source_agent: Agent = "claude",
 ) -> dict[str, Any]:
-    """Put focused work blocks on the user's calendar through Muse. Blocks are logged in SCHEDULE.md
-    and exported to schedule.ics, which Muse subscribes to. Check list_schedule first to avoid clashes,
-    and keep blocks realistic: 45 to 120 minutes, at sensible hours."""
+    """Only for work that must happen at a FIXED time the user asked for (e.g. "book Saturday 10-11").
+    For normal planning use plan_tasks and let Muse pick the times. Blocks go in SCHEDULE.md and
+    schedule.ics, which Muse copies to the calendar as is."""
     sched = schedule()
     added, removed = sched.add(blocks, replace_upcoming=replace_upcoming, source_agent=source_agent)
     return {
@@ -273,7 +344,7 @@ def remove_time_blocks(ids: Annotated[list[str], Field(min_length=1)]) -> dict[s
 def check_muse_inbox(
     days: Annotated[int, Field(ge=1, le=90, description="How far back to list processed items.")] = 7,
 ) -> dict[str, Any]:
-    """Apply any new updates Muse wrote to muse/inbox/ (blocks done/skipped/moved, note progress, new notes), then
+    """Apply any new updates Muse wrote to muse/inbox/ (tasks done/skipped, blocks, note progress, new notes), then
     list Muse's recent items with their messages, what was applied, and any errors to fix."""
     processed, _ = vault().sync()
     return {"newly_processed": len(processed), "recent": muse.recent_activity(vault(), days=days)}
@@ -285,7 +356,7 @@ def read_muse_exports(
     days_ahead: Annotated[int, Field(ge=1, le=90)] = 14,
 ) -> list[dict[str, Any]]:
     """Read what Muse exported to muse/exports/, mainly the user's real calendar (busy time), with
-    events filtered to the next `days_ahead` days. Check this before scheduling time blocks."""
+    events filtered to the next `days_ahead` days. Check this to keep planned work realistic."""
     return muse.read_exports(vault(), days_ahead=days_ahead)
 
 
@@ -299,8 +370,9 @@ def commit_this_conversation() -> str:
         "Review this conversation for anything durable: a plan, roadmap, architecture, decision, or "
         "breakthrough. Call read_index first, then search_notes for an existing note to update. Use "
         "commit_note (or update_note) with accurate frontmatter, and log_decision_or_question for each "
-        "settled decision and open question. If there's an actionable plan with dates, propose time "
-        "blocks and, once I confirm, call schedule_time_blocks. Skip casual Q&A. Finally, tell me "
+        "settled decision and open question. If there's an actionable plan, propose tasks for the next "
+        "1-2 weeks (what, how long, by when; no clock times) and, once I confirm, call plan_tasks so Muse "
+        "can schedule them. Skip casual Q&A. Finally, tell me "
         "exactly what you saved and where."
     )
 

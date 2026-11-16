@@ -1,10 +1,10 @@
 """The file-based loop between Muse and Claude.
 
-Muse (via its Mac app's file access) reads ``schedule.ics`` / ``SCHEDULE.md`` / ``INDEX.md`` and writes
-only inside ``muse/``:
+Muse (via its Mac app's file access) reads ``TASKS.md`` (work to schedule) / ``schedule.ics`` (fixed-time
+blocks) / ``INDEX.md`` and writes only inside ``muse/``:
 
-- ``muse/inbox/``     one file per update (block done/skipped/moved, note progress, a new note, free-text
-                      message).
+- ``muse/inbox/``     one file per update (task done/skipped, block done/skipped/moved, note progress, a new
+                      note, free-text message).
                       CortexHub applies the structured parts whenever Claude checks the vault, then moves
                       the file to ``muse/processed/YYYY-MM/`` with a record of what was applied.
 - ``muse/exports/``   Muse's calendar export (busy time) and any other exports, read by Claude on demand.
@@ -41,29 +41,37 @@ MUSE_NOTE_STATUSES = ("active", "paused", "completed")
 NEW_NOTE_FIELDS = {"title", "node_type", "project", "tags", "summary", "deadline", "in_progress", "related",
                    "status"}
 # sha256 of earlier default MUSE.md versions: an untouched old guide is upgraded, a customized one is kept
-_OLD_GUIDE_HASHES = {"7f306fb07f1c6c175d3ffa5199e3dff7b47721cf591a8023f9b08fd9fb02820e"}
+_OLD_GUIDE_HASHES = {"7f306fb07f1c6c175d3ffa5199e3dff7b47721cf591a8023f9b08fd9fb02820e",
+                     "570fb8bfa85f27c911e01985c9a8aff5d59bc51ef3d92e60fea842d945289c9a"}
+TASK_UPDATE_FIELDS = {"id", "status", "note", "scheduled_for"}
 RECENT_DAYS = 7
 
 MUSE_GUIDE = """\
 # CortexHub ↔ Muse protocol
 
 Muse: you share this folder with Claude. Claude writes the user's plans here and you schedule them.
-This file says where to read and where to write. Paths are relative to this folder.
+**Claude decides what to do, how long it takes and by when. You decide when.** This file says where to
+read and where to write. Paths are relative to this folder.
 
 ## What to read
 
-- **`schedule.ics`**: time blocks Claude has planned, in standard iCalendar format. Put them on the user's
-  calendar (Google Calendar). Each event's UID (`<id>@cortexhub`) never changes, so an event you've already
-  seen is an update, not a new event. If an event disappears, it was removed or skipped.
-- **`SCHEDULE.md`**: the same blocks in readable form, with each block's `id` and the plan it comes from.
+- **`TASKS.md`**: the work to schedule. Each open task has a title, a duration, a window (earliest →
+  due), a priority, what to do, and sometimes rules (e.g. "Fri/Sat/Sun only"). Put each open task on the
+  user's calendar (Google Calendar) inside its window, following its rules and the user's preferences, and
+  keep tasks from the same plan in the order listed. Move them whenever the user needs; you don't have to
+  report moves. Each task's `id` never changes: a task you've already scheduled may have new details, so
+  update its event. If an open task disappears from TASKS.md, it was replaced or removed, so delete its
+  event. If a task can't fit in its window, schedule it as soon as possible after and tell Claude.
+- **`schedule.ics`** / **`SCHEDULE.md`**: rare fixed-time blocks the user asked for. Copy them to the
+  calendar as they are. Each event's UID (`<id>@cortexhub`) never changes. If one disappears, remove it.
 - **`INDEX.md`**: active projects, deadlines, current focus and open questions. Use it to prioritize.
-- **`projects/`, `plans/`**: the detailed notes behind each block.
+- **`projects/`, `plans/`**: the detailed plans behind each task.
 - **`notes/vault-conventions.md`** (if present): how the user wants notes organized. Follow it whenever you
   create a note.
 
 ## Where to write: only inside `muse/`
 
-Don't edit `INDEX.md`, `SCHEDULE.md`, `schedule.ics` or the notes, and don't create files outside `muse/`.
+Don't edit `INDEX.md`, `TASKS.md`, `SCHEDULE.md`, `schedule.ics` or the notes, and don't create files outside `muse/`.
 They're regenerated, so your edits would be overwritten. Write to the inbox instead and CortexHub applies it
 for you.
 
@@ -76,6 +84,12 @@ section is optional:
 ---
 from: muse
 created_at: "2026-11-16T18:00:00-05:00"
+tasks:
+  - id: "math-w3-session-1-normal-a1b2"
+    status: done              # done | skipped
+    note: "Struggled with z-tables; wants more practice."   # optional, for Claude
+  - id: "arduino-ohm-s-law-lab-c3d4"
+    scheduled_for: "2026-11-21T10:00:00-05:00"   # optional: where it is on the calendar (no status needed)
 blocks:
   - id: "5e09b087fec7"
     status: done              # done | skipped
@@ -91,8 +105,10 @@ note_updates:
 Optional free-text message for Claude, e.g. "User keeps skipping morning blocks; prefers afternoons."
 ```
 
-The next time Claude checks the vault, CortexHub applies `blocks` and `note_updates` and moves the file to
-`muse/processed/`, adding what it applied and any errors. Claude sees your message.
+Report a task as soon as the user finishes or skips it, with a short note if there's anything worth knowing.
+The next time Claude checks the vault, CortexHub applies `tasks`, `blocks` and `note_updates` (finished and
+skipped tasks are also logged in the plan's Progress Log) and moves the file to `muse/processed/`, adding
+what it applied and any errors. Claude sees your message.
 
 ### 2. New notes also go in `muse/inbox/`
 
@@ -125,7 +141,7 @@ status, milestone or progress, use `note_updates` instead.
 ### 3. Calendar export goes in `muse/exports/calendar.md`
 
 Keep this file current (overwrite it) with the user's existing events for the next 14 days, so Claude
-doesn't plan over them:
+can see how busy the user is and keep the planned load realistic:
 
 ```markdown
 ---
@@ -199,6 +215,43 @@ def _apply_blocks(vault: "Vault", items: list[dict[str, Any]], applied: list[str
             if start:
                 what.append(f"moved → {block['start']}")
             applied.append(f"block {bid} ({block['title']}): {', '.join(what)}")
+        except VaultError as exc:
+            errors.append(str(exc))
+
+
+def _apply_tasks(vault: "Vault", items: list[dict[str, Any]], applied: list[str], errors: list[str]) -> None:
+    from .tasks import Tasks
+
+    tasks = Tasks(vault)
+    for item in items:
+        tid = item.get("id")
+        try:
+            if not tid:
+                raise VaultError("a tasks entry has no id")
+            unknown = set(item) - TASK_UPDATE_FIELDS
+            if unknown:
+                errors.append(f"task {tid}: ignored unsupported fields {sorted(unknown)}")
+            status = item.get("status")
+            if status not in (None, "done", "skipped", "todo"):
+                raise VaultError(f"task {tid}: status must be done, skipped or todo, not {status!r}")
+            if not (status or item.get("note") or item.get("scheduled_for")):
+                raise VaultError(f"task {tid}: give a status (done/skipped), a note or scheduled_for")
+            task = tasks.update(str(tid), status=status, note=item.get("note"),
+                                scheduled_for=item.get("scheduled_for"), updated_by="muse")
+            what = [f"status → {status}"] if status else []
+            if item.get("note"):
+                what.append("note added")
+            if item.get("scheduled_for"):
+                what.append(f"on calendar {task['scheduled_for']}")
+            applied.append(f"task {tid} ({task['title']}): {', '.join(what)}")
+            if status in ("done", "skipped") and task.get("plan"):
+                mark = "✅ Done" if status == "done" else "⏭️ Skipped"
+                note = f" {str(item['note']).strip()}" if item.get("note") else ""
+                try:
+                    vault.update_note(task["plan"].split("#")[0], append_under="Progress Log",
+                                      append_to_body=f"- **{today().isoformat()}** (Muse) {mark}: {task['title']}.{note}")
+                except VaultError as exc:
+                    errors.append(f"task {tid}: updated, but couldn't log it on {task['plan']}: {exc}")
         except VaultError as exc:
             errors.append(str(exc))
 
@@ -301,6 +354,7 @@ def _process_file(vault: "Vault", path: Path) -> dict[str, Any]:
     errors: list[str] = []
     if text.lstrip().startswith("---") and not meta:
         errors.append("couldn't parse the YAML frontmatter, so nothing was applied (original kept below)")
+    _apply_tasks(vault, _items(meta.get("tasks"), "tasks", errors), applied, errors)
     _apply_blocks(vault, _items(meta.get("blocks"), "blocks", errors), applied, errors)
     _apply_note_updates(vault, _items(meta.get("note_updates"), "note_updates", errors), applied, errors)
     _apply_new_note(vault, meta.get("new_note"), body, applied, errors)

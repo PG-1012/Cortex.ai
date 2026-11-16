@@ -13,7 +13,7 @@ from .conftest import ROBOTICS_BODY
 EXPECTED_TOOLS = {
     "read_index", "read_note", "search_notes", "commit_note", "update_note", "log_decision_or_question",
     "resolve_question", "schedule_time_blocks", "list_schedule", "remove_time_blocks", "update_time_block",
-    "check_muse_inbox", "read_muse_exports",
+    "check_muse_inbox", "read_muse_exports", "plan_tasks", "update_task", "list_tasks", "remove_tasks",
 }
 
 
