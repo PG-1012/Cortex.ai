@@ -138,7 +138,9 @@ def muse_prompt() -> None:
         f"exactly. Every time you plan my week, (1) read {root}/schedule.ics and put new or changed blocks on my "
         f"calendar, and remove events that disappeared from it; (2) when I finish, skip or move a block, or make "
         f"progress on a plan, write an update file to {root}/muse/inbox/ in the format MUSE.md describes; "
-        f"(3) keep {root}/muse/exports/calendar.md current with my events for the next 14 days. Never edit "
+        f"(3) keep {root}/muse/exports/calendar.md current with my events for the next 14 days; (4) when I ask "
+        f"you to save something to CortexHub (a plan, an insight, a summary), write it as a new_note file in "
+        f"{root}/muse/inbox/ as MUSE.md describes, following {root}/notes/vault-conventions.md. Never edit "
         f"INDEX.md, SCHEDULE.md, schedule.ics or the notes directly.",
         soft_wrap=True,
     )

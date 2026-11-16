@@ -10,8 +10,8 @@ plain Markdown in an Obsidian-compatible vault at `~/CortexVault/`.
   plans, decisions and project notes.
 - **Muse bridge (two-way, file-based)**: when Claude plans your week, its time blocks go into
   `SCHEDULE.md` and `schedule.ics`, which the Muse Mac app reads straight from the vault. Muse
-  writes back into `muse/inbox/` (blocks done, skipped or moved; progress on plans; messages for
-  Claude) and exports your real calendar to `muse/exports/`. CortexHub applies Muse's updates the
+  writes back into `muse/inbox/` (blocks done, skipped or moved; progress on plans; new notes;
+  messages for Claude) and exports your real calendar to `muse/exports/`. CortexHub applies Muse's updates the
   next time Claude checks the vault. No tunnel, no cloud.
 
 ## Setup
@@ -67,7 +67,7 @@ Run these with `uv run cortex …` from the project folder, or install the CLI g
 | `resolve_question` | Close an open question, optionally logging the answer as a decision. |
 | `schedule_time_blocks` / `list_schedule` / `remove_time_blocks` | The Muse bridge. `replace_upcoming=true` re-plans without duplicating blocks (finished blocks are kept). |
 | `update_time_block` | Mark a block done or skipped, or move it. Skipped blocks drop off the calendar feed. |
-| `check_muse_inbox` | Apply Muse's inbox, then list Muse's recent messages, what was applied, and any errors. |
+| `check_muse_inbox` | Apply Muse's inbox (including new notes), then list Muse's recent messages, what was applied, and any errors. |
 | `read_muse_exports` | Your real calendar (busy time) and other exports from Muse, so Claude doesn't double-book you. |
 
 ## Vault layout
@@ -104,7 +104,7 @@ files in the vault:
 
 ```
 Claude ──schedule_time_blocks──▶ SCHEDULE.md + schedule.ics ──read──▶ Muse ──▶ Google Calendar
-Claude ◀──read_index / check_muse_inbox── muse/inbox/   ◀──write── Muse (done / skipped / moved / progress)
+Claude ◀──read_index / check_muse_inbox── muse/inbox/   ◀──write── Muse (done / skipped / moved / progress / new notes)
 Claude ◀──read_muse_exports──────────── muse/exports/  ◀──write── Muse (your real calendar)
 ```
 
@@ -112,13 +112,16 @@ Claude ◀──read_muse_exports──────────── muse/expor
 2. Run `uv run cortex muse-prompt` and paste its output into Muse once. It points Muse to
    `MUSE.md`, which spells out the exact file formats.
 3. Done. When Claude next reads the index, Muse's updates are applied (block status, note
-   `in_progress`/`status`/`deadline`, progress appended under `## Progress Log`). Each inbox file is
+   `in_progress`/`status`/`deadline`, progress appended under `## Progress Log`, and new notes from
+   `new_note:` files). Each inbox file is
    moved to `muse/processed/` with an audit record, and a **From Muse** banner at the top of INDEX.md
    lists recent activity and any errors.
 
 Safety rails:
 - Muse writes only inside `muse/`. If it (or you) edits the generated `INDEX.md` directly, the edit
   isn't silently lost: it's saved as a diff in `muse/processed/` and flagged in the banner.
+- Muse never overwrites a note. If a `new_note` has the same title as an existing note, its text is
+  appended under a dated `## From Muse` heading instead. Notes Muse creates have `source_agent: muse`.
 - Files modified in the last 5 seconds are left alone, so a half-written file is never read.
 - Invalid entries are recorded as errors and the valid ones still apply.
 

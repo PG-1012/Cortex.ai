@@ -228,3 +228,98 @@ def test_update_block_validation(seeded):
         s.update_block(ids[0], status="finished")
     with pytest.raises(VaultError):
         s.update_block(ids[0], end="2030-01-01T10:00")
+
+
+NEW_PLAN = """---
+from: muse
+new_note:
+  title: Calculus I Review Plan
+  node_type: plan
+  project: Math
+  tags: [learning/math]
+  summary: Two-week review before the midterm.
+  deadline: "2026-12-10"
+  in_progress: "Week 1: Limits"
+---
+# Calculus I Review Plan
+
+## Week 1: Limits
+- epsilon-delta
+
+```python
+# not a heading
+```
+"""
+
+
+def test_new_note_is_created(vault):
+    drop(vault, "2026-11-16-0900-calc-plan.md", NEW_PLAN)
+    processed, index = vault.sync()
+    item = processed[0]
+    assert item["errors"] == [] and item["message"] is None
+    assert item["applied"] == ["created note [[plans/calculus-i-review-plan]]"]
+    note = vault.read("plans/calculus-i-review-plan")
+    assert note.meta["source_agent"] == "muse"
+    assert note.project == "math" and note.meta["tags"] == ["learning/math"]
+    assert note.deadline.isoformat() == "2026-12-10" and note.meta["in_progress"] == "Week 1: Limits"
+    assert "## Week 1: Limits" in note.body
+    assert "[[plans/calculus-i-review-plan#Week 1 Limits]]" in index  # shows up in focus
+    assert ">   - created note [[plans/calculus-i-review-plan]]" in index  # and in the Muse banner
+    assert muse.recent_activity(vault)[0]["message"] is None
+
+
+def test_new_note_never_overwrites(seeded):
+    vault, _ = seeded
+    before = vault.read(PLAN).body
+    drop(vault, "dup.md", """---
+new_note:
+  title: Robotics Kinematics 6-Week Plan
+  node_type: plan
+  project: robotics-prep
+---
+# Robotics Kinematics 6-Week Plan
+
+## Extra idea
+Try MuJoCo.
+""")
+    item = vault.sync()[0][0]
+    assert item["errors"] == []
+    assert item["applied"] == [f"appended to existing note [[{PLAN}]] (same title; nothing was overwritten)"]
+    after = vault.read(PLAN).body
+    assert after.startswith(before.rstrip())  # original kept intact
+    assert "## From Muse (" in after and "#### Extra idea" in after and "Try MuJoCo." in after
+    assert len(vault.search(node_type="plan")) == 1
+
+
+def test_new_note_flags_new_project_name(seeded):
+    vault, _ = seeded
+    drop(vault, "maths.md", "---\nnew_note:\n  title: Limits Cheat Sheet\n  project: maths\n---\nlim x->0\n")
+    applied = vault.sync()[0][0]["applied"][0]
+    assert applied.startswith("created note [[notes/limits-cheat-sheet]]")
+    assert "new project name 'maths'" in applied and "robotics-prep" in applied
+
+
+def test_new_note_validation(vault):
+    drop(vault, "a.md", "---\nnew_note:\n  node_type: plan\n---\nbody\n")
+    drop(vault, "b.md", "---\nnew_note:\n  title: Empty\n---\n")
+    drop(vault, "c.md", "---\nnew_note:\n  title: Bad Type\n  node_type: essay\n---\nx\n")
+    drop(vault, "d.md", "---\nnew_note:\n  title: Gone\n  status: archived\n---\nx\n")
+    drop(vault, "e.md", "---\nnew_note:\n  title: Odd\n  colour: blue\n---\nx\n")
+    drop(vault, "f.md", "---\nnew_note: just a string\n---\nx\n")
+    errors = {r["file"].rsplit("/", 1)[-1]: r["errors"] for r in vault.sync()[0]}
+    assert "no title" in errors["a"][0]
+    assert "no body" in errors["b"][0]
+    assert "node_type" in errors["c"][0]
+    assert "status" in errors["d"][0]
+    assert "colour" in errors["e"][0] and vault.read("notes/odd")  # unknown field ignored, note still saved
+    assert "must be a mapping" in errors["f"][0]
+    assert {n.path for n in vault.notes()} == {"notes/odd.md"}
+
+
+def test_old_default_guide_is_upgraded(vault, monkeypatch):
+    import hashlib
+    guide = vault.root / "MUSE.md"
+    guide.write_text("old default")
+    monkeypatch.setattr(muse, "_OLD_GUIDE_HASHES", {hashlib.sha256(b"old default").hexdigest()})
+    vault.init()
+    assert "new_note:" in guide.read_text()

@@ -18,7 +18,7 @@ from .vault import Vault, VaultError
 INSTRUCTIONS = """\
 CortexHub is the user's shared long-term memory: a plain-Markdown Obsidian vault plus a file-based
 two-way bridge to Muse, their scheduling app. Muse reads schedule.ics from the vault and writes
-updates back into muse/inbox/ (applied automatically) and its calendar into muse/exports/.
+updates and new notes back into muse/inbox/ (applied automatically) and its calendar into muse/exports/.
 
 1. ALWAYS call `read_index` first, before searching, creating or updating notes. INDEX.md lists
    active projects and deadlines, current focus, settled decisions and open questions, with links.
@@ -34,6 +34,8 @@ updates back into muse/inbox/ (applied automatically) and its calendar into muse
    `replace_upcoming=true` when re-planning, so old blocks are replaced rather than duplicated.
 5. If INDEX.md shows a "From Muse" banner, call `check_muse_inbox` and take Muse's messages into
    account (e.g. skipped blocks mean the plan may need adjusting). Fix anything listed as an error.
+   Notes Muse created (source_agent: muse) are real notes: check they fit the vault's conventions
+   (project names, titles) and tidy them with update_note if not.
 6. Note paths are vault-relative without ".md", e.g. "plans/robotics-kinematics-plan".
 """
 
@@ -271,7 +273,7 @@ def remove_time_blocks(ids: Annotated[list[str], Field(min_length=1)]) -> dict[s
 def check_muse_inbox(
     days: Annotated[int, Field(ge=1, le=90, description="How far back to list processed items.")] = 7,
 ) -> dict[str, Any]:
-    """Apply any new updates Muse wrote to muse/inbox/ (blocks done/skipped/moved, note progress), then
+    """Apply any new updates Muse wrote to muse/inbox/ (blocks done/skipped/moved, note progress, new notes), then
     list Muse's recent items with their messages, what was applied, and any errors to fix."""
     processed, _ = vault().sync()
     return {"newly_processed": len(processed), "recent": muse.recent_activity(vault(), days=days)}

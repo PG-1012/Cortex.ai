@@ -3,7 +3,8 @@
 Muse (via its Mac app's file access) reads ``schedule.ics`` / ``SCHEDULE.md`` / ``INDEX.md`` and writes
 only inside ``muse/``:
 
-- ``muse/inbox/``     one file per update (block done/skipped/moved, note progress, free-text message).
+- ``muse/inbox/``     one file per update (block done/skipped/moved, note progress, a new note, free-text
+                      message).
                       CortexHub applies the structured parts whenever Claude checks the vault, then moves
                       the file to ``muse/processed/YYYY-MM/`` with a record of what was applied.
 - ``muse/exports/``   Muse's calendar export (busy time) and any other exports, read by Claude on demand.
@@ -14,6 +15,8 @@ The contract Muse follows is written to ``MUSE.md`` in the vault root.
 from __future__ import annotations
 
 import difflib
+import hashlib
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -21,7 +24,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from .vault import VaultError, atomic_write, now_iso, render_frontmatter, split_frontmatter, today
+from .vault import (FOLDERS, VaultError, atomic_write, now_iso, render_frontmatter, slugify, split_frontmatter,
+                    today)
 
 if TYPE_CHECKING:
     from .vault import Vault
@@ -34,6 +38,10 @@ SETTLE_SECONDS = 5  # don't touch files Muse may still be writing
 TEXT_SUFFIXES = {".md", ".markdown", ".txt"}
 NOTE_UPDATE_FIELDS = {"path", "status", "in_progress", "deadline", "progress"}
 MUSE_NOTE_STATUSES = ("active", "paused", "completed")
+NEW_NOTE_FIELDS = {"title", "node_type", "project", "tags", "summary", "deadline", "in_progress", "related",
+                   "status"}
+# sha256 of earlier default MUSE.md versions: an untouched old guide is upgraded, a customized one is kept
+_OLD_GUIDE_HASHES = {"7f306fb07f1c6c175d3ffa5199e3dff7b47721cf591a8023f9b08fd9fb02820e"}
 RECENT_DAYS = 7
 
 MUSE_GUIDE = """\
@@ -50,11 +58,14 @@ This file says where to read and where to write. Paths are relative to this fold
 - **`SCHEDULE.md`**: the same blocks in readable form, with each block's `id` and the plan it comes from.
 - **`INDEX.md`**: active projects, deadlines, current focus and open questions. Use it to prioritize.
 - **`projects/`, `plans/`**: the detailed notes behind each block.
+- **`notes/vault-conventions.md`** (if present): how the user wants notes organized. Follow it whenever you
+  create a note.
 
 ## Where to write: only inside `muse/`
 
-Don't edit `INDEX.md`, `SCHEDULE.md`, `schedule.ics` or the notes. They're regenerated, so your edits would
-be overwritten. Write updates to the inbox instead and CortexHub applies them for you.
+Don't edit `INDEX.md`, `SCHEDULE.md`, `schedule.ics` or the notes, and don't create files outside `muse/`.
+They're regenerated, so your edits would be overwritten. Write to the inbox instead and CortexHub applies it
+for you.
 
 ### 1. Updates go in `muse/inbox/`
 
@@ -83,7 +94,35 @@ Optional free-text message for Claude, e.g. "User keeps skipping morning blocks;
 The next time Claude checks the vault, CortexHub applies `blocks` and `note_updates` and moves the file to
 `muse/processed/`, adding what it applied and any errors. Claude sees your message.
 
-### 2. Calendar export goes in `muse/exports/calendar.md`
+### 2. New notes also go in `muse/inbox/`
+
+To save something durable (a plan, an insight, a summary) as a new note, write **one file per note**. Put
+`new_note:` in the frontmatter, and write the note itself as the file's body:
+
+```markdown
+---
+from: muse
+new_note:
+  title: "Calculus I Review Plan"   # required; be specific, it becomes the file name
+  node_type: plan                   # project | plan | decision | note (default: note)
+  project: math                     # reuse an existing project name from INDEX.md
+  tags: [learning/math]             # optional
+  summary: "Two-week review before the midterm."   # optional, shown in INDEX.md
+  deadline: "2026-12-10"            # optional: YYYY-MM-DD
+  in_progress: "Week 1: Limits"     # optional: the current milestone (a heading below)
+---
+# Calculus I Review Plan
+
+## Week 1: Limits
+...
+```
+
+CortexHub saves it in the right folder (`plans/`, `notes/`, ...), marked as coming from Muse. Nothing is ever
+overwritten: if a note with the same title already exists, your text is added to the end of that note under a
+dated "From Muse" heading instead. Save only durable things, not chit-chat. To change an existing note's
+status, milestone or progress, use `note_updates` instead.
+
+### 3. Calendar export goes in `muse/exports/calendar.md`
 
 Keep this file current (overwrite it) with the user's existing events for the next 14 days, so Claude
 doesn't plan over them:
@@ -110,7 +149,7 @@ def ensure_layout(vault: "Vault") -> None:
     for sub in (INBOX, PROCESSED, EXPORTS):
         (vault.root / sub).mkdir(parents=True, exist_ok=True)
     guide = vault.root / "MUSE.md"
-    if not guide.exists():
+    if not guide.exists() or hashlib.sha256(guide.read_bytes()).hexdigest() in _OLD_GUIDE_HASHES:
         atomic_write(guide, MUSE_GUIDE)
 
 
@@ -191,6 +230,70 @@ def _apply_note_updates(vault: "Vault", items: list[dict[str, Any]], applied: li
             errors.append(str(exc))
 
 
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _demote_headings(text: str, levels: int = 2) -> str:
+    """Push headings down so appended text nests under the "From Muse" heading (code blocks untouched)."""
+    out, fenced = [], False
+    for line in text.splitlines():
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced and re.match(r"^#{1,6}\s", line):
+            line = "#" * min(6, len(line) - len(line.lstrip("#")) + levels) + line.lstrip("#")
+        out.append(line)
+    return "\n".join(out)
+
+
+def _apply_new_note(vault: "Vault", spec: Any, body: str, applied: list[str], errors: list[str]) -> None:
+    """Create the note described by ``new_note`` (body = the file body). Never overwrites an existing note."""
+    if spec is None:
+        return
+    if not isinstance(spec, dict):
+        errors.append("`new_note` must be a mapping (title, node_type, project, ...); it was ignored")
+        return
+    title = str(spec.get("title") or "").strip()
+    try:
+        if not title:
+            raise VaultError("new_note has no title, so nothing was saved")
+        if not body.strip():
+            raise VaultError(f"new_note {title!r}: the file has no body, so nothing was saved")
+        unknown = set(spec) - NEW_NOTE_FIELDS
+        if unknown:
+            errors.append(f"new_note {title!r}: ignored unsupported fields {sorted(unknown)}")
+        node_type = spec.get("node_type") or "note"
+        if node_type not in FOLDERS:
+            raise VaultError(f"new_note {title!r}: node_type must be one of {tuple(FOLDERS)}, not {node_type!r}")
+        status = spec.get("status") or "active"
+        if status not in MUSE_NOTE_STATUSES:
+            raise VaultError(f"new_note {title!r}: status must be one of {MUSE_NOTE_STATUSES}, not {status!r}")
+        fields = {k: spec[k] for k in ("project", "tags", "summary", "deadline", "in_progress", "related")
+                  if spec.get(k) not in (None, "", [])}
+
+        slug = slugify(title)
+        target = vault.root / FOLDERS[node_type] / f"{slug}.md"
+        hits = [target] if target.exists() else [p for p in vault._md_files() if p.stem == slug]
+        if len(hits) > 1:
+            raise VaultError(f"new_note {title!r}: several notes already have this name ("
+                             + ", ".join(vault.rel(h) for h in hits) + "), so nothing was saved")
+        if hits:
+            note = vault.update_note(vault.rel(hits[0]), append_to_body=_demote_headings(body.strip()),
+                                     append_under=f"From Muse ({today().isoformat()})")
+            applied.append(f"appended to existing note [[{note.link}]] (same title; nothing was overwritten)")
+            return
+
+        known_projects = {n.project for n in vault.notes() if n.project}
+        note, _ = vault.commit_note(title, body.strip() + "\n", node_type=node_type, status=status,
+                                    source_agent="muse", **fields)
+        extra = ""
+        if note.project and known_projects and note.project not in known_projects:
+            extra = (f" (new project name {note.project!r}; existing: {', '.join(sorted(known_projects))}. "
+                     "Check it isn't a variant of one of them)")
+        applied.append(f"created note [[{note.link}]]{extra}")
+    except VaultError as exc:
+        errors.append(str(exc))
+
+
 def _process_file(vault: "Vault", path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
     meta, body = split_frontmatter(text)
@@ -200,13 +303,15 @@ def _process_file(vault: "Vault", path: Path) -> dict[str, Any]:
         errors.append("couldn't parse the YAML frontmatter, so nothing was applied (original kept below)")
     _apply_blocks(vault, _items(meta.get("blocks"), "blocks", errors), applied, errors)
     _apply_note_updates(vault, _items(meta.get("note_updates"), "note_updates", errors), applied, errors)
+    _apply_new_note(vault, meta.get("new_note"), body, applied, errors)
 
     dest = _processed_dest(vault, path.name)
     record = {**meta, "cortex_processed_at": now_iso(), "cortex_applied": applied, "cortex_errors": errors}
     atomic_write(dest, render_frontmatter(record) + "\n" + body.lstrip("\n"))
     path.unlink()
-    return {"file": vault.rel(dest)[:-3], "applied": applied, "errors": errors,
-            "message": body.strip() or None}
+    # a new_note file's body is the note itself, not a message for Claude
+    message = None if "new_note" in meta else (body.strip() or None)
+    return {"file": vault.rel(dest)[:-3], "applied": applied, "errors": errors, "message": message}
 
 
 def process_inbox(vault: "Vault") -> list[dict[str, Any]]:
@@ -249,7 +354,7 @@ def recent_activity(vault: "Vault", days: int = RECENT_DAYS) -> list[dict[str, A
             "headline": headline,
             "applied": meta.get("cortex_applied") or [],
             "errors": meta.get("cortex_errors") or [],
-            "message": body.strip()[:4000] or None,
+            "message": None if "new_note" in meta else (body.strip()[:4000] or None),
         })
     return sorted(items, key=lambda i: i["processed_at"], reverse=True)
 
@@ -269,6 +374,9 @@ def banner_lines(vault: "Vault", limit: int = 8) -> list[str]:
             bits.append(f"⚠️ {len(i['errors'])} error{'s' if len(i['errors']) > 1 else ''}")
         extra = f" ({', '.join(bits)})" if bits else ""
         lines.append(f"> - [{i['processed_at'][:10]}] {head}{extra} -> [[{i['file']}]]")
+        for a in i["applied"]:
+            if str(a).startswith(("created note", "appended to existing note")):
+                lines.append(f">   - {a}")
     if len(items) > limit:
         lines.append(f"> - _…{len(items) - limit} more_")
     for p in exports:
